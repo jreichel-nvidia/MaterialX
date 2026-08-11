@@ -128,7 +128,16 @@ void ClosureLayerNodeMdl::emitFunctionCall(const ShaderNode& _node, GenContext& 
                 ShaderNode* fg = fgOutput ? fgOutput->getNode() : nullptr;
                 ShaderNode* bg = bgOutput ? bgOutput->getNode() : nullptr;
                 ShaderNode* mix = mixOutput ? mixOutput->getNode() : nullptr;
-                if ((bool) fg != (bool) bg)
+                if (fg && bg &&
+                    !bg->hasClassification(ShaderNode::Classification::LAYER) &&
+                    bg->getInput(StringConstantsMdl::BASE))
+                {
+                    // A mix layers its foreground over its background, so
+                    // transport the outer base through a layerable background.
+                    baseReceiverNode = bg;
+                    break;
+                }
+                else if ((bool) fg != (bool) bg)
                 {
                     baseReceiverNode = fg ? fg : bg; // take the node that is valid
                     top = baseReceiverNode;
