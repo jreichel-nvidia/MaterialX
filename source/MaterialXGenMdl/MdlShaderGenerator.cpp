@@ -27,6 +27,7 @@ MATERIALX_NAMESPACE_BEGIN
 namespace
 {
 
+
 const vector<string> DEFAULT_IMPORTS =
 {
     "import ::df::*",
