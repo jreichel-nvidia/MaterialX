@@ -53,12 +53,14 @@ const string MDL_VERSION_1_8 = "1.8";
 const string MDL_VERSION_1_9 = "1.9";
 const string MDL_VERSION_1_10 = "1.10";
 const string MDL_VERSION_1_11 = "1.11";
+const string MDL_VERSION_1_12 = "1.12";
 const string MDL_VERSION_SUFFIX_1_6 = "1_6";
 const string MDL_VERSION_SUFFIX_1_7 = "1_7";
 const string MDL_VERSION_SUFFIX_1_8 = "1_8";
 const string MDL_VERSION_SUFFIX_1_9 = "1_9";
 const string MDL_VERSION_SUFFIX_1_10 = "1_10";
 const string MDL_VERSION_SUFFIX_1_11 = "1_11";
+const string MDL_VERSION_SUFFIX_1_12 = "1_12";
 
 } // anonymous namespace
 
@@ -159,6 +161,9 @@ ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, G
                                       "'. MdlSyntax::makeValidName() can be used to generate a valid name.");
     }
 
+    GenMdlOptions::MdlVersion version = getMdlVersion(context);
+    static_cast<MdlSyntax&>(*_syntax).setMdlVersion(version);
+
     // For MDL we cannot cache node implementations between generation calls,
     // because this generator needs to do edits to subgraphs implementations
     // depending on the context in which a node is used.
@@ -180,6 +185,10 @@ ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, G
     for (const string& module : DEFAULT_IMPORTS)
     {
         emitLine(module, stage);
+    }
+    if (version >= GenMdlOptions::MdlVersion::MDL_1_12)
+    {
+        emitLine("import ::color_space::*", stage);
     }
     for (const string& module : DEFAULT_VERSIONED_IMPORTS)
     {
@@ -798,10 +807,13 @@ void MdlShaderGenerator::emitMdlVersionNumber(GenContext& context, ShaderStage& 
         case GenMdlOptions::MdlVersion::MDL_1_10:
             emitString(MDL_VERSION_1_10, stage);
             break;
-        default:
-            // GenMdlOptions::MdlVersion::MDL_1_11
-            // GenMdlOptions::MdlVersion::MDL_LATEST
+        case GenMdlOptions::MdlVersion::MDL_1_11:
             emitString(MDL_VERSION_1_11, stage);
+            break;
+        default:
+            // GenMdlOptions::MdlVersion::MDL_1_12
+            // GenMdlOptions::MdlVersion::MDL_LATEST
+            emitString(MDL_VERSION_1_12, stage);
             break;
     }
     emitLineEnd(stage, true);
@@ -824,10 +836,12 @@ const string& MdlShaderGenerator::getMdlVersionFilenameSuffix(GenContext& contex
             return MDL_VERSION_SUFFIX_1_9;
         case GenMdlOptions::MdlVersion::MDL_1_10:
             return MDL_VERSION_SUFFIX_1_10;
-        default:
-            // GenMdlOptions::MdlVersion::MDL_1_11
-            // GenMdlOptions::MdlVersion::MDL_LATEST
+        case GenMdlOptions::MdlVersion::MDL_1_11:
             return MDL_VERSION_SUFFIX_1_11;
+        default:
+            // GenMdlOptions::MdlVersion::MDL_1_12
+            // GenMdlOptions::MdlVersion::MDL_LATEST
+            return MDL_VERSION_SUFFIX_1_12;
     }
 }
 

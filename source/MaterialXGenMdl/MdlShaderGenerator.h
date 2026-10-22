@@ -10,42 +10,11 @@
 /// MDL shading language generator
 
 #include <MaterialXGenMdl/Export.h>
+#include <MaterialXGenMdl/GenMdlOptions.h>
 
 #include <MaterialXGenShader/ShaderGenerator.h>
 
 MATERIALX_NAMESPACE_BEGIN
-
-/// Generator context data class to pass strings.
-class MX_GENMDL_API GenMdlOptions : public GenUserData
-{
-  public:
-    /// MDL Versions supported by the Code Generator
-    enum class MdlVersion
-    {
-        MDL_1_6,
-        MDL_1_7,
-        MDL_1_8,
-        MDL_1_9,
-        MDL_1_10,
-        MDL_1_11,
-        MDL_LATEST = MDL_1_11
-    };
-
-    /// Create MDL code generator options with default values.
-    GenMdlOptions() :
-        targetVersion(MdlVersion::MDL_LATEST) { }
-
-    /// Unique identifier for the MDL options on the GenContext object.
-    static const string GEN_CONTEXT_USER_DATA_KEY;
-
-    /// The MDL version number the generated module will have.
-    /// Allows to generate MDL for older applications by limiting support according
-    /// to the corresponding specification. By default this option is MDL_LATEST.
-    MdlVersion targetVersion;
-};
-
-/// Shared pointer to GenMdlOptions
-using GenMdlOptionsPtr = shared_ptr<class GenMdlOptions>;
 
 /// Shared pointer to an MdlShaderGenerator
 using MdlShaderGeneratorPtr = shared_ptr<class MdlShaderGenerator>;

@@ -10,6 +10,7 @@
 /// MDL syntax class
 
 #include <MaterialXGenMdl/Export.h>
+#include <MaterialXGenMdl/GenMdlOptions.h>
 
 #include <MaterialXGenShader/Syntax.h>
 
@@ -42,6 +43,12 @@ class MX_GENMDL_API MdlSyntax : public Syntax
 
     /// Override to indicate array variables have no array suffix.
     string getArrayVariableSuffix(TypeDesc, const Value&) const override { return EMPTY_STRING; };
+
+    /// Set the target MDL language version.
+    void setMdlVersion(GenMdlOptions::MdlVersion version) { _mdlVersion = version; }
+
+    /// Return the target MDL language version, which defaults to MDL_LATEST.
+    GenMdlOptions::MdlVersion getMdlVersion() const { return _mdlVersion; }
 
     static const string CONST_QUALIFIER;
     static const string UNIFORM_QUALIFIER;
@@ -79,6 +86,9 @@ class MX_GENMDL_API MdlSyntax : public Syntax
 
     /// Get the MDL language versing marker: {{MDL_VERSION_SUFFIX}}.
     const string& getMdlVersionSuffixMarker() const;
+
+  private:
+    GenMdlOptions::MdlVersion _mdlVersion;
 };
 
 /// @class MdlStructTypeSyntax

@@ -21,7 +21,7 @@ const string MARKER_MDL_VERSION_SUFFIX = "MDL_VERSION_SUFFIX";
 class MdlFilenameTypeSyntax : public ScalarTypeSyntax
 {
   public:
-    MdlFilenameTypeSyntax(const Syntax* parent) :
+    MdlFilenameTypeSyntax(const MdlSyntax* parent) :
         ScalarTypeSyntax(parent, "texture_2d", "texture_2d()", "texture_2d()")
     {
     }
@@ -60,8 +60,13 @@ class MdlFilenameTypeSyntax : public ScalarTypeSyntax
             pathSeparator = "/";
         }
 
+        GenMdlOptions::MdlVersion version = static_cast<const MdlSyntax*>(_parent)->getMdlVersion();
+        string colorSpace = version >= GenMdlOptions::MdlVersion::MDL_1_12 ?
+            "color_space::cs_lin_rec709" : "tex::gamma_linear";
+
         // MDL is using leading slashes as separator
-        return getName() + "(\"" + pathSeparator + path.asString(FilePath::FormatPosix) + "\", tex::gamma_linear)";
+        return getName() + "(\"" + pathSeparator + path.asString(FilePath::FormatPosix) + "\", " +
+               colorSpace + ")";
     }
 };
 
@@ -191,7 +196,9 @@ const string MdlSyntax::PORT_NAME_PREFIX = "mxp_";
 // MdlSyntax methods
 //
 
-MdlSyntax::MdlSyntax(TypeSystemPtr typeSystem) : Syntax(typeSystem)
+MdlSyntax::MdlSyntax(TypeSystemPtr typeSystem) :
+    Syntax(typeSystem),
+    _mdlVersion(GenMdlOptions::MdlVersion::MDL_LATEST)
 {
     // Add in all reserved words and keywords in MDL
     // Formatted as in the MDL Specification 1.9.2 for easy comparing
