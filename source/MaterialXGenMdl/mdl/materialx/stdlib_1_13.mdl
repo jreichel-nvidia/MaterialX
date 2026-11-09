@@ -1,0 +1,677 @@
+// Copyright Contributors to the MaterialX Project
+// SPDX-License-Identifier: Apache-2.0
+
+// TODO change to 1.13
+mdl 99.99;
+
+import ::anno::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+
+import .::core::*;
+import .::stdlib_1_12::*;
+
+// Remap floor-based integer texel coordinates.
+int mx_bspline_remap(int coord, int resolution, tex::wrap_mode wrap)
+{
+    if (wrap == tex::wrap_clamp || wrap == tex::wrap_clip)
+        return math::clamp(coord, 0, resolution - 1);
+
+    if (wrap == tex::wrap_mirrored_repeat)
+    {
+        int period = 2 * resolution;
+        int result = (coord % period + period) % period;
+        return result < resolution ? result : period - 1 - result;
+    }
+
+    // tex::wrap_repeat
+    return (coord % resolution + resolution) % resolution;
+}
+
+// Weights of a cubic B-spline including its derivative.
+struct mx_bspline_weights {
+    float4 value;
+    float4 deriv;
+};
+
+// Compute weights of a cubic B-spline including its derivative for parameter t.
+mx_bspline_weights mx_compute_bspline_weights(float t)
+{
+    float t2  = t * t;
+    float t3  = t2 * t;
+    float tmp = 0.5f * t2;
+
+    return mx_bspline_weights(
+        float4(
+            (-1.0f / 6.0f) * t3 + tmp - 0.5f * t + (1.0f / 6.0f),
+                      0.5f * t3 -  t2 +            (4.0f / 6.0f),
+                     -0.5f * t3 + tmp + 0.5f * t + (1.0f / 6.0f),
+            ( 1.0f / 6.0f) * t3),
+        float4(
+            -tmp              + t - 0.5f,
+             1.5f * t2 - 2.0f * t,
+            -1.5f * t2        + t + 0.5f,
+            tmp));
+}
+
+// The mx_image_with_derivatives_* variants below preserve the ordinary image lookup value and
+// supply approximate gradients from B-spline interpolation of texel values. These gradients are
+// not generally the derivatives of the returned value. For nonlinear downstream operations, the
+// propagated gradients need not match the derivatives of either reconstruction.
+//
+// Value-only consumers therefore receive the same value whether or not the image also feeds a
+// heighttonormal "in" input. When derivatives are unused, the MDL compiler can eliminate the
+// additional texel fetches and B-spline calculations.
+
+export float mx_image_with_derivatives_float(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    float mxp_default = float(0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    if (!tex::texture_isvalid(mxp_file))
+        return mxp_default;
+
+    uniform int2 resolution = int2(tex::width(mxp_file), tex::height(mxp_file));
+    if (resolution.x <= 0 || resolution.y <= 0)
+        return mxp_default;
+
+    float value = stdlib_1_12::mx_image_float(
+        mxp_file, mxp_layer, mxp_default, mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v);
+
+    float2 uv = mxp_flip_v ? float2(mxp_texcoord.x, 1.0 - mxp_texcoord.y) : mxp_texcoord;
+    // Map normalized UVs to texel-center coordinates: texel i is at (i + 0.5) / resolution.
+    float2 texel_position = uv * float2(resolution) - 0.5;
+
+    // Keep the existing gradient fallback outside the B-spline center domain.
+    if (mxp_uaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.x < 0.0 || texel_position.x >= float(resolution.x)))
+        return float(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+    if (mxp_vaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.y < 0.0 || texel_position.y >= float(resolution.y)))
+        return float(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+
+    int2 cell = int2(math::floor(texel_position));
+    float2 fraction = texel_position - math::floor(texel_position);
+    mx_bspline_weights w_u = mx_compute_bspline_weights(fraction.x);
+    mx_bspline_weights w_v = mx_compute_bspline_weights(fraction.y);
+    uniform tex::wrap_mode wrap_u = core::map_addressmode(mxp_uaddressmode);
+    uniform tex::wrap_mode wrap_v = core::map_addressmode(mxp_vaddressmode);
+
+    float du = float(0.0);
+    float dv = float(0.0);
+    for (int j = 0; j < 4; ++j)
+    {
+        int y = mx_bspline_remap(cell.y + j - 1, resolution.y, wrap_v);
+        float row_value = float(0.0);
+        float row_du = float(0.0);
+        for (int i = 0; i < 4; ++i)
+        {
+            int x = mx_bspline_remap(cell.x + i - 1, resolution.x, wrap_u);
+            float sample = float(tex::texel_float(mxp_file, int2(x, y)));
+            row_value += sample * w_u.value[i];
+            row_du += sample * w_u.deriv[i];
+        }
+        du += row_du * w_v.value[j];
+        dv += row_value * w_v.deriv[j];
+    }
+
+    // Convert texel derivatives to UV units, then to the application's derivative basis.
+    du *= float(resolution.x);
+    dv *= float(resolution.y);
+    float2 dx = math::DX(uv);
+    float2 dy = math::DY(uv);
+    return float(math::make_dual(value, du * dx.x + dv * dx.y, du * dy.x + dv * dy.y));
+}
+
+export float2 mx_image_with_derivatives_vector2(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    float2 mxp_default = float2(0.0, 0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    if (!tex::texture_isvalid(mxp_file))
+        return mxp_default;
+
+    uniform int2 resolution = int2(tex::width(mxp_file), tex::height(mxp_file));
+    if (resolution.x <= 0 || resolution.y <= 0)
+        return mxp_default;
+
+    float2 value = stdlib_1_12::mx_image_vector2(
+        mxp_file, mxp_layer, mxp_default, mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v);
+
+    float2 uv = mxp_flip_v ? float2(mxp_texcoord.x, 1.0 - mxp_texcoord.y) : mxp_texcoord;
+    // Map normalized UVs to texel-center coordinates: texel i is at (i + 0.5) / resolution.
+    float2 texel_position = uv * float2(resolution) - 0.5;
+
+    // Keep the existing gradient fallback outside the B-spline center domain.
+    if (mxp_uaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.x < 0.0 || texel_position.x >= float(resolution.x)))
+        return float2(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+    if (mxp_vaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.y < 0.0 || texel_position.y >= float(resolution.y)))
+        return float2(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+
+    int2 cell = int2(math::floor(texel_position));
+    float2 fraction = texel_position - math::floor(texel_position);
+    mx_bspline_weights w_u = mx_compute_bspline_weights(fraction.x);
+    mx_bspline_weights w_v = mx_compute_bspline_weights(fraction.y);
+    uniform tex::wrap_mode wrap_u = core::map_addressmode(mxp_uaddressmode);
+    uniform tex::wrap_mode wrap_v = core::map_addressmode(mxp_vaddressmode);
+
+    float2 du = float2(0.0);
+    float2 dv = float2(0.0);
+    for (int j = 0; j < 4; ++j)
+    {
+        int y = mx_bspline_remap(cell.y + j - 1, resolution.y, wrap_v);
+        float2 row_value = float2(0.0);
+        float2 row_du = float2(0.0);
+        for (int i = 0; i < 4; ++i)
+        {
+            int x = mx_bspline_remap(cell.x + i - 1, resolution.x, wrap_u);
+            float2 sample = float2(tex::texel_float2(mxp_file, int2(x, y)));
+            row_value += sample * w_u.value[i];
+            row_du += sample * w_u.deriv[i];
+        }
+        du += row_du * w_v.value[j];
+        dv += row_value * w_v.deriv[j];
+    }
+
+    // Convert texel derivatives to UV units, then to the application's derivative basis.
+    du *= float(resolution.x);
+    dv *= float(resolution.y);
+    float2 dx = math::DX(uv);
+    float2 dy = math::DY(uv);
+    return float2(math::make_dual(value, du * dx.x + dv * dx.y, du * dy.x + dv * dy.y));
+}
+
+export float3 mx_image_with_derivatives_vector3(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    float3 mxp_default = float3(0.0, 0.0, 0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    if (!tex::texture_isvalid(mxp_file))
+        return mxp_default;
+
+    uniform int2 resolution = int2(tex::width(mxp_file), tex::height(mxp_file));
+    if (resolution.x <= 0 || resolution.y <= 0)
+        return mxp_default;
+
+    float3 value = stdlib_1_12::mx_image_vector3(
+        mxp_file, mxp_layer, mxp_default, mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v);
+
+    float2 uv = mxp_flip_v ? float2(mxp_texcoord.x, 1.0 - mxp_texcoord.y) : mxp_texcoord;
+    // Map normalized UVs to texel-center coordinates: texel i is at (i + 0.5) / resolution.
+    float2 texel_position = uv * float2(resolution) - 0.5;
+
+    // Keep the existing gradient fallback outside the B-spline center domain.
+    if (mxp_uaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.x < 0.0 || texel_position.x >= float(resolution.x)))
+        return float3(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+    if (mxp_vaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.y < 0.0 || texel_position.y >= float(resolution.y)))
+        return float3(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+
+    int2 cell = int2(math::floor(texel_position));
+    float2 fraction = texel_position - math::floor(texel_position);
+    mx_bspline_weights w_u = mx_compute_bspline_weights(fraction.x);
+    mx_bspline_weights w_v = mx_compute_bspline_weights(fraction.y);
+    uniform tex::wrap_mode wrap_u = core::map_addressmode(mxp_uaddressmode);
+    uniform tex::wrap_mode wrap_v = core::map_addressmode(mxp_vaddressmode);
+
+    float3 du = float3(0.0);
+    float3 dv = float3(0.0);
+    for (int j = 0; j < 4; ++j)
+    {
+        int y = mx_bspline_remap(cell.y + j - 1, resolution.y, wrap_v);
+        float3 row_value = float3(0.0);
+        float3 row_du = float3(0.0);
+        for (int i = 0; i < 4; ++i)
+        {
+            int x = mx_bspline_remap(cell.x + i - 1, resolution.x, wrap_u);
+            float3 sample = float3(tex::texel_float3(mxp_file, int2(x, y)));
+            row_value += sample * w_u.value[i];
+            row_du += sample * w_u.deriv[i];
+        }
+        du += row_du * w_v.value[j];
+        dv += row_value * w_v.deriv[j];
+    }
+
+    // Convert texel derivatives to UV units, then to the application's derivative basis.
+    du *= float(resolution.x);
+    dv *= float(resolution.y);
+    float2 dx = math::DX(uv);
+    float2 dy = math::DY(uv);
+    return float3(math::make_dual(value, du * dx.x + dv * dx.y, du * dy.x + dv * dy.y));
+}
+
+export float4 mx_image_with_derivatives_vector4(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    float4 mxp_default = float4(0.0, 0.0, 0.0, 0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    if (!tex::texture_isvalid(mxp_file))
+        return mxp_default;
+
+    uniform int2 resolution = int2(tex::width(mxp_file), tex::height(mxp_file));
+    if (resolution.x <= 0 || resolution.y <= 0)
+        return mxp_default;
+
+    float4 value = stdlib_1_12::mx_image_vector4(
+        mxp_file, mxp_layer, mxp_default, mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v);
+
+    float2 uv = mxp_flip_v ? float2(mxp_texcoord.x, 1.0 - mxp_texcoord.y) : mxp_texcoord;
+    // Map normalized UVs to texel-center coordinates: texel i is at (i + 0.5) / resolution.
+    float2 texel_position = uv * float2(resolution) - 0.5;
+
+    // Keep the existing gradient fallback outside the B-spline center domain.
+    if (mxp_uaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.x < 0.0 || texel_position.x >= float(resolution.x)))
+        return float4(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+    if (mxp_vaddressmode == core::mx_addressmode_type_constant
+        && (texel_position.y < 0.0 || texel_position.y >= float(resolution.y)))
+        return float4(math::make_dual(value, math::DX(mxp_default), math::DY(mxp_default)));
+
+    int2 cell = int2(math::floor(texel_position));
+    float2 fraction = texel_position - math::floor(texel_position);
+    mx_bspline_weights w_u = mx_compute_bspline_weights(fraction.x);
+    mx_bspline_weights w_v = mx_compute_bspline_weights(fraction.y);
+    uniform tex::wrap_mode wrap_u = core::map_addressmode(mxp_uaddressmode);
+    uniform tex::wrap_mode wrap_v = core::map_addressmode(mxp_vaddressmode);
+
+    float4 du = float4(0.0);
+    float4 dv = float4(0.0);
+    for (int j = 0; j < 4; ++j)
+    {
+        int y = mx_bspline_remap(cell.y + j - 1, resolution.y, wrap_v);
+        float4 row_value = float4(0.0);
+        float4 row_du = float4(0.0);
+        for (int i = 0; i < 4; ++i)
+        {
+            int x = mx_bspline_remap(cell.x + i - 1, resolution.x, wrap_u);
+            float4 sample = float4(tex::texel_float4(mxp_file, int2(x, y)));
+            row_value += sample * w_u.value[i];
+            row_du += sample * w_u.deriv[i];
+        }
+        du += row_du * w_v.value[j];
+        dv += row_value * w_v.deriv[j];
+    }
+
+    // Convert texel derivatives to UV units, then to the application's derivative basis.
+    du *= float(resolution.x);
+    dv *= float(resolution.y);
+    float2 dx = math::DX(uv);
+    float2 dy = math::DY(uv);
+    return float4(math::make_dual(value, du * dx.x + dv * dx.y, du * dy.x + dv * dy.y));
+}
+
+export color mx_image_with_derivatives_color3(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    color mxp_default = color(0.0, 0.0, 0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    return color(mx_image_with_derivatives_vector3(
+        mxp_file, mxp_layer, float3(mxp_default), mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v));
+}
+
+export core::color4 mx_image_with_derivatives_color4(
+    uniform texture_2d mxp_file = texture_2d()
+    [[
+        anno::display_name("Filename")
+    ]],
+    uniform string mxp_layer = string("")
+    [[
+        anno::display_name("Layer")
+    ]],
+    core::color4 mxp_default = core::mk_color4(0.0, 0.0, 0.0, 0.0)
+    [[
+        anno::display_name("Default Color")
+    ]],
+    float2 mxp_texcoord = float2(core::mx_swizzle_xy(::state::texture_coordinate(0)))
+    [[
+        anno::display_name("Texture Coordinates")
+    ]],
+    uniform core::mx_addressmode_type mxp_uaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode U")
+    ]],
+    uniform core::mx_addressmode_type mxp_vaddressmode
+        = core::mx_addressmode_type(core::mx_addressmode_type_periodic)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Address Mode V")
+    ]],
+    uniform core::mx_filterlookup_type mxp_filtertype
+        = core::mx_filterlookup_type(core::mx_filterlookup_type_linear)
+    [[
+        anno::description("Enumeration {closest,linear,cubic}."),
+        anno::display_name("Filter Type")
+    ]],
+    uniform string mxp_framerange = string("")
+    [[
+        anno::display_name("Frame Range")
+    ]],
+    uniform int mxp_frameoffset = int(0)
+    [[
+        anno::display_name("Frame Offset")
+    ]],
+    uniform core::mx_addressmode_type mxp_frameendaction
+        = core::mx_addressmode_type(core::mx_addressmode_type_constant)
+    [[
+        anno::description("Enumeration {constant,clamp,periodic,mirror}."),
+        anno::display_name("Frame End Action")
+    ]],
+    uniform bool mxp_flip_v = false
+    [[
+        anno::usage("for applying the 'fileTextureVerticalFlip' shader generator option."),
+        anno::hidden()
+    ]]
+)
+    [[
+        anno::description("Node Group: texture2d")
+    ]]
+{
+    return core::mk_color4(mx_image_with_derivatives_vector4(
+        mxp_file, mxp_layer, core::mk_float4(mxp_default), mxp_texcoord,
+        mxp_uaddressmode, mxp_vaddressmode, mxp_filtertype,
+        mxp_framerange, mxp_frameoffset, mxp_frameendaction, mxp_flip_v));
+}
+
+export float3 mx_heighttonormal_with_derivatives(float height, float scale, float2 uv)
+{
+    // Scale factor for parity with traditional Sobel filtering.
+    float SOBEL_SCALE_FACTOR = 1.0 / 16.0;
+    float2 dhdxy = scale * SOBEL_SCALE_FACTOR * float2(math::DX(height), math::DY(height));
+    float2 dudxy = float2(math::DX(uv.x), math::DY(uv.x));
+    float2 dvdxy = float2(math::DX(uv.y), math::DY(uv.y));
+
+    float3 tangent   = float3(dudxy.x, dvdxy.x, dhdxy.x);
+    float3 bitangent = float3(dudxy.y, dvdxy.y, dhdxy.y);
+    float3 normal    = math::cross(tangent, bitangent);
+
+    if (math::dot(normal, normal) < 1.0e-16)
+        return float3(0.5, 0.5, 1.0);
+
+    return math::normalize(normal.z < 0.0 ? -normal : normal) * 0.5 + 0.5;
+}

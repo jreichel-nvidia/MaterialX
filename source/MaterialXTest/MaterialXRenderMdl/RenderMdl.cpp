@@ -93,13 +93,13 @@ RenderUtil::RenderProfileResult MdlShaderRenderTester::runRenderer(
             result.elementsTested++;
 
             mx::ShaderPtr shader;
+            mx::GenMdlOptionsPtr genMdlOptions = std::make_shared<mx::GenMdlOptions>();
             try
             {
                 mx::ScopedTimer genTimer(&result.languageTimes.generationTime);
                 context.getOptions() = options;
 
                 // Specify the MDL target version to be the latest which is also the default.
-                mx::GenMdlOptionsPtr genMdlOptions = std::make_shared<mx::GenMdlOptions>();
                 genMdlOptions->targetVersion = mx::GenMdlOptions::MdlVersion::MDL_LATEST;
                 context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, genMdlOptions);
 
@@ -188,6 +188,10 @@ RenderUtil::RenderProfileResult MdlShaderRenderTester::runRenderer(
                 command += " --uv_scale 0.5 1";
 
                 // Application setup
+                if (genMdlOptions->enable_derivatives)
+                {
+                    command += " -d";
+                }
                 command += " --noaux";
                 command += " --nocc";
                 command += " --no_shader_opt";      // does not pay off for the testsuite

@@ -20,7 +20,7 @@
 // and
 //     MaterialX: An Open Standard for Network-Based CG Object Looks
 //     Document v1.37 REV2, January 19, 2020
-//     www.materialx.org 
+//     www.materialx.org
 // in
 //     NVIDIA Material Definition Language 1.7
 //     Language Specification
@@ -68,7 +68,7 @@ export struct color4 {
 };
 
 // NOTE: MDL does not support operator overloading nor custom constructors,
-//       we use constructor-like functions defined here to help the generator 
+//       we use constructor-like functions defined here to help the generator
 //       to work with the vector and color types, as well as operator-like
 //       functions for the color4 type.
 export color4 mk_color4( float  v) { return color4( color(v), v);}
@@ -135,6 +135,18 @@ export enum mx_addressmode_type {
     mx_addressmode_type_periodic,
     mx_addressmode_type_mirror
 };
+
+// Helper function mapping texture node addressmodes to MDL wrap modes
+export ::tex::wrap_mode map_addressmode( mx_addressmode_type value) {
+    switch (value) {
+    case mx_addressmode_type_clamp:
+        return ::tex::wrap_clamp;
+    case mx_addressmode_type_mirror:
+        return ::tex::wrap_mirrored_repeat;
+    default:
+        return ::tex::wrap_repeat;
+    }
+}
 
 // Enum selecting filter modes for texture nodes, instead of string
 export enum mx_filterlookup_type {

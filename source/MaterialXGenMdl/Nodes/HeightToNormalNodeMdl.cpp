@@ -4,6 +4,7 @@
 //
 
 #include <MaterialXGenMdl/Nodes/HeightToNormalNodeMdl.h>
+#include <MaterialXGenMdl/GenMdlOptions.h>
 
 #include <MaterialXGenShader/Exception.h>
 #include <MaterialXGenShader/GenContext.h>
@@ -22,6 +23,9 @@ const string sampleSizeFunctionUV = "mx_compute_sample_size_uv";
 
 const unsigned int sampleCount = 9;
 const unsigned int filterWidth = 3;
+
+// Keep these values in sync with mx_normal_from_samples_sobel in sampling.mdl:
+// it uses the same UV sample spacing to convert Sobel sums to height derivatives.
 const float filterSize = 1.0;
 const float filterOffset = 0.0;
 
@@ -69,6 +73,23 @@ void HeightToNormalNodeMdl::emitFunctionCall(const ShaderNode& node, GenContext&
         if (!inInput || !scaleInput)
         {
             throw ExceptionShaderGenError("Node '" + node.getName() + "' is not a valid heighttonormal node");
+        }
+
+        GenMdlOptionsPtr options = context.getUserData<GenMdlOptions>(GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY);
+        if (options && options->enable_derivatives)
+        {
+            shadergen.emitLineBegin(stage);
+            shadergen.emitOutput(node.getOutput(), true, false, context, stage);
+            // TODO For MDL 1.13, emit the module suffix with emitMdlVersionFilenameSuffix().
+            shadergen.emitString(" = materialx::stdlib_1_13::mx_heighttonormal_with_derivatives(", stage);
+            shadergen.emitInput(inInput, context, stage);
+            shadergen.emitString(", ", stage);
+            shadergen.emitInput(scaleInput, context, stage);
+            shadergen.emitString(", ", stage);
+            shadergen.emitInput(node.getInput("texcoord"), context, stage);
+            shadergen.emitString(")", stage);
+            shadergen.emitLineEnd(stage);
+            return;
         }
 
         // Create the input "samples". This means to emit the calls to

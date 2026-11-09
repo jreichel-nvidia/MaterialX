@@ -662,6 +662,11 @@ void ShaderGeneratorTester::validate(const mx::GenOptions& generateOptions, cons
         std::cerr << "Cannot read options file: " << optionsFilePath << ". Skipping test." << std::endl;
         return;
     }
+    validate(generateOptions, options);
+}
+
+void ShaderGeneratorTester::validate(const mx::GenOptions& generateOptions, const TestSuiteOptions& options)
+{
     // Test has been turned off so just do nothing.
     if (!runTest(options))
     {
@@ -680,6 +685,9 @@ void ShaderGeneratorTester::validate(const mx::GenOptions& generateOptions, cons
         tracingGuard.emplace();
     }
 #endif
+
+    if (!options.outputDirectory.isEmpty())
+        options.outputDirectory.createDirectory(true);
 
     // Start logging - use outputDirectory if set
     mx::FilePath logPath = options.resolveOutputPath(_logFilePath);

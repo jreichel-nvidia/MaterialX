@@ -39,7 +39,7 @@ void SourceCodeNodeMdl::resolveSourceCode(const InterfaceElement& /*element*/, G
 {
     // Initialize without fetching the source code from file.
     // The resolution of MDL modules is done by the MDL compiler when loading the generated source code.
-    // All references MDL modules must be accessible via MDL search paths set up by the consuming application.
+    // All referenced MDL modules must be accessible via MDL search paths set up by the consuming application.
 }
 
 void SourceCodeNodeMdl::initialize(const InterfaceElement& element, GenContext& context)
@@ -84,6 +84,11 @@ void SourceCodeNodeMdl::emitFunctionDefinition(const ShaderNode&, GenContext&, S
 
 void SourceCodeNodeMdl::emitFunctionCall(const ShaderNode& node, GenContext& context, ShaderStage& stage) const
 {
+    emitFunctionCall(node, context, stage, _functionSource);
+}
+
+void SourceCodeNodeMdl::emitFunctionCall(const ShaderNode& node, GenContext& context, ShaderStage& stage, const string& source) const
+{
     DEFINE_SHADER_STAGE(stage, Stage::PIXEL)
     {
         const ShaderGenerator& shadergen = context.getShaderGenerator();
@@ -99,7 +104,7 @@ void SourceCodeNodeMdl::emitFunctionCall(const ShaderNode& node, GenContext& con
         {
             const MdlSyntax& syntax = static_cast<const MdlSyntax&>(shadergenMdl.getSyntax());
             const string versionSuffix = shadergenMdl.getMdlVersionFilenameSuffix(context);
-            string code = syntax.replaceSourceCodeMarkers(node.getName(), _functionSource,
+            string code = syntax.replaceSourceCodeMarkers(node.getName(), source,
                                                              [&shadergenMdl, &context, &node, &versionSuffix, syntax](const string& marker)
             {
                 // Special handling for the version suffix of MDL source code modules.

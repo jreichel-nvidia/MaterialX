@@ -4,6 +4,7 @@
 //
 
 #include <MaterialXGenMdl/Nodes/ImageNodeMdl.h>
+#include <MaterialXGenMdl/MdlShaderGenerator.h>
 #include <MaterialXGenMdl/Nodes/ConvolutionNode.h>
 #include <MaterialXGenShader/ShaderGenerator.h>
 #include <MaterialXGenShader/Shader.h>
@@ -39,10 +40,12 @@ void ImageNodeMdl::emitFunctionCall(const ShaderNode& _node, GenContext& context
     {
         ShaderNode& node = const_cast<ShaderNode&>(_node);
 
+        GenMdlOptionsPtr options = context.getUserData<GenMdlOptions>(GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY);
+        bool derivatives = options && options->enable_derivatives;
         ShaderOutput* output = node.getOutput();
         string outputSuffix;
         context.getOutputSuffix(output, outputSuffix);
-        if (outputSuffix.empty() && output && !output->getConnections().empty())
+        if (!derivatives && outputSuffix.empty() && output && !output->getConnections().empty())
         {
             bool sampledOnly = true;
             for (const ShaderInput* connection : output->getConnections())
@@ -71,6 +74,17 @@ void ImageNodeMdl::emitFunctionCall(const ShaderNode& _node, GenContext& context
         if (flipUInput)
         {
             flipUInput->setValue(value);
+        }
+        if (derivatives && _derivativeNodes.count(&node))
+        {
+            string source = _functionSource;
+            string prefix = "materialx::stdlib_{{MDL_VERSION_SUFFIX}}::mx_image_";
+            size_t pos = source.find(prefix);
+            // TODO replace 1_13 with {{MDL_VERSION_SUFFIX}}
+            if (pos != string::npos)
+                source.replace(pos, prefix.size(), "materialx::stdlib_1_13::mx_image_with_derivatives_");
+            BASE::emitFunctionCall(_node, context, stage, source);
+            return;
         }
         BASE::emitFunctionCall(_node, context, stage);
     }

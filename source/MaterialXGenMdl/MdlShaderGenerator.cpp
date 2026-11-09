@@ -150,6 +150,94 @@ void MdlShaderGenerator::applyDefaultOptions(GenOptions& options) const
     options.distributeLayerOverBsdfMix = true;
 }
 
+namespace
+{
+
+// Stack of nodes whose graph implementations contain the current traversal position,
+// ordered from outermost to innermost instance. Empty at the root shader graph.
+// The last instance resolves the current graph's interface inputs to caller connections.
+using InstancePath = vector<const ShaderNode*>;
+
+// Outputs already visited in a particular instance context. An output in a shared graph
+// implementation can lead to different upstream nodes through different callers, so the
+// full instance path is part of the key. Repeated visits in the same context are skipped.
+using VisitedOutputs = std::set<std::pair<const ShaderOutput*, InstancePath>>;
+using VisitedGraphs = std::set<std::pair<const ShaderGraph*, InstancePath>>;
+
+// Finds all image nodes upstream of a shader output and marks them to require derivatives.
+//
+// @param output Shader output to start from.
+// @param path Current graph instance path, restored before returning normally.
+// @param visited Output/instance-path pairs already visited during this traversal.
+void markDerivativeImages(const ShaderOutput* output, InstancePath& path, VisitedOutputs& visited)
+{
+    if (!output || !visited.emplace(output, path).second)
+        return;
+
+    const ShaderNode* node = output->getNode();
+    if (node->isAGraph())
+    {
+        if (!path.empty())
+        {
+            const ShaderNode* instance = path.back();
+            path.pop_back();
+            const ShaderInput* input = instance->getInput(output->getName());
+            if (input)
+                markDerivativeImages(input->getConnection(), path, visited);
+            path.push_back(instance);
+        }
+        return;
+    }
+
+    if (const auto* image = dynamic_cast<const ImageNodeMdl*>(&node->getImplementation()))
+        image->requireDerivatives(node);
+
+    if (ShaderGraph* graph = node->getImplementation().getGraph())
+    {
+        path.push_back(node);
+        const ShaderInput* socket = graph->getOutputSocket(output->getName());
+        if (socket)
+            markDerivativeImages(socket->getConnection(), path, visited);
+        path.pop_back();
+    }
+    else
+        for (const ShaderInput* input : node->getInputs())
+            markDerivativeImages(input->getConnection(), path, visited);
+}
+
+// Finds all image nodes upstream of heighttonormal "in" inputs in this graph and its nested graph
+// instances, and marks them to require derivatives.
+//
+// @param graph Graph to start from.
+// @param path Current graph instance path, restored before returning normally. Pass an empty vector
+//             in the outermost call.
+// @param visitedGraphs Used to avoid repeated work. Pass an empty set in the outermost call.
+// @param visitedOutputs Used to avoid repeated work. Pass an empty set in the outermost call.
+void findDerivativeImages(const ShaderGraph& graph, InstancePath& path,
+                          VisitedGraphs& visitedGraphs, VisitedOutputs& visitedOutputs)
+{
+    if (!visitedGraphs.emplace(&graph, path).second)
+        return;
+
+    for (const ShaderNode* node : graph.getNodes())
+    {
+        if (dynamic_cast<const HeightToNormalNodeMdl*>(&node->getImplementation()))
+        {
+            const ShaderInput* input = node->getInput("in");
+            if (input)
+                markDerivativeImages(input->getConnection(), path, visitedOutputs);
+        }
+        if (ShaderGraph* subgraph = node->getImplementation().getGraph())
+        {
+            path.push_back(node);
+            findDerivativeImages(*subgraph, path, visitedGraphs, visitedOutputs);
+            path.pop_back();
+        }
+    }
+}
+
+} // anonymous namespace
+
 ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, GenContext& context) const
 {
     // Reject invalid names to avoid generating invalid MDL code.
@@ -162,6 +250,12 @@ ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, G
     }
 
     GenMdlOptions::MdlVersion version = getMdlVersion(context);
+    GenMdlOptionsPtr options = context.getUserData<GenMdlOptions>(GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY);
+    // TODO update to MDL_1_13
+    if (options && options->enable_derivatives && version < GenMdlOptions::MdlVersion::MDL_1_12)
+    {
+        throw ExceptionShaderGenError("MDL generator option 'enable_derivatives' requires MDL 1.13 or later.");
+    }
     static_cast<MdlSyntax&>(*_syntax).setMdlVersion(version);
 
     // For MDL we cannot cache node implementations between generation calls,
@@ -175,6 +269,13 @@ ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, G
     ScopedFloatFormatting fmt(Value::FloatFormatFixed);
 
     ShaderGraph& graph = shader->getGraph();
+    if (options && options->enable_derivatives)
+    {
+        InstancePath path;
+        VisitedGraphs visitedGraphs;
+        VisitedOutputs visitedOutputs;
+        findDerivativeImages(graph, path, visitedGraphs, visitedOutputs);
+    }
     ShaderStage& stage = shader->getStage(Stage::PIXEL);
 
     // Emit version
@@ -196,6 +297,11 @@ ShaderPtr MdlShaderGenerator::generate(const string& name, ElementPtr element, G
         emitMdlVersionFilenameSuffix(context, stage);
         emitString(IMPORT_ALL, stage);
         emitLineEnd(stage, true);
+    }
+    // TODO should be removed with MDL 1.13 (handled by the loop above)
+    if (options && options->enable_derivatives)
+    {
+        emitLine("using ::materialx::stdlib_1_13 import *", stage);
     }
 
     // Emit custom node imports for nodes in the graph
@@ -788,6 +894,13 @@ void MdlShaderGenerator::emitMdlVersionNumber(GenContext& context, ShaderStage& 
 {
     GenMdlOptions::MdlVersion version = getMdlVersion(context);
 
+    // TODO should be removed with MDL 1.13 (handled by the switch below)
+    GenMdlOptionsPtr options = context.getUserData<GenMdlOptions>(GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY);
+    if (options && options->enable_derivatives)
+    {
+        emitLine("mdl 99.99", stage);
+        return;
+    }
     emitLineBegin(stage);
     emitString("mdl ", stage);
     switch (version)

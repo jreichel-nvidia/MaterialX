@@ -80,18 +80,6 @@ export material mx_surface_unlit(
 
 // Texture Nodes
 
-// Helper function mapping texture node addressmodes to MDL wrap modes
-::tex::wrap_mode map_addressmode( core::mx_addressmode_type value) {
-    switch (value) {
-    case core::mx_addressmode_type_clamp:
-        return ::tex::wrap_clamp;
-    case core::mx_addressmode_type_mirror:
-        return ::tex::wrap_mirrored_repeat;
-    default:
-        return ::tex::wrap_repeat;
-    }
-}
-
 // Helper function provides texture lookup coordinate with `closest` lookup type support
 float2 tex_lookup_coord(float2 st, int tex_width, int tex_height, core::mx_filterlookup_type lookup_type, bool flip_v)
 {
@@ -187,8 +175,8 @@ export float mx_image_float(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode));
 	return returnValue;
 }
 
@@ -266,8 +254,8 @@ export color mx_image_color3(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode));
 	return returnValue;
 }
 
@@ -345,8 +333,8 @@ export core::color4 mx_image_color4(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode)));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode)));
 	return returnValue;
 }
 
@@ -424,8 +412,8 @@ export float2 mx_image_vector2(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode));
 	return returnValue;
 }
 
@@ -503,8 +491,8 @@ export float3 mx_image_vector3(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode));
 	return returnValue;
 }
 
@@ -582,8 +570,8 @@ export float4 mx_image_vector4(
 							tex::height(mxp_file),
 							mxp_filtertype,
 							mxp_flip_v),
-						wrap_u: map_addressmode(mxp_uaddressmode),
-						wrap_v: map_addressmode(mxp_vaddressmode));
+						wrap_u: core::map_addressmode(mxp_uaddressmode),
+						wrap_v: core::map_addressmode(mxp_vaddressmode));
 	return returnValue;
 }
 

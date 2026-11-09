@@ -34,7 +34,8 @@ class MX_GENMDL_API GenMdlOptions : public GenUserData
 
     /// Create MDL code generator options with default values.
     GenMdlOptions() :
-        targetVersion(MdlVersion::MDL_LATEST) { }
+        targetVersion(MdlVersion::MDL_LATEST),
+        enable_derivatives(false) { }
 
     /// Unique identifier for the MDL options on the GenContext object.
     static const string GEN_CONTEXT_USER_DATA_KEY;
@@ -43,6 +44,14 @@ class MX_GENMDL_API GenMdlOptions : public GenUserData
     /// Allows to generate MDL for older applications by limiting support according
     /// to the corresponding specification. By default this option is MDL_LATEST.
     MdlVersion targetVersion;
+
+    /// Enable derivative support.
+    ///
+    /// Disabled by default and requires MDL 1.13.
+    ///
+    /// When enabled, image nodes upstream of a heighttonormal "in" input are mapped to
+    /// mx_image_with_derivatives instead of mx_image.
+    bool enable_derivatives;
 };
 
 /// Shared pointer to GenMdlOptions

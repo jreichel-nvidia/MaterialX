@@ -30,6 +30,7 @@ class MX_GENMDL_API SourceCodeNodeMdl : public SourceCodeNode
   protected:
     void resolveSourceCode(const InterfaceElement& element, GenContext& context) override;
     string _returnStruct;
+    void emitFunctionCall(const ShaderNode& node, GenContext& context, ShaderStage& stage, const string& source) const;
 };
 
 MATERIALX_NAMESPACE_END

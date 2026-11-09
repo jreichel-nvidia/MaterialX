@@ -51,9 +51,16 @@ export float2 mx_compute_sample_size_uv(float2 uv, float filterSize, float filte
 //
 export float3 mx_normal_from_samples_sobel(float[9] S, float scale)
 {
+    // Scale factor for parity with traditional Sobel filtering.
+    float SOBEL_SCALE_FACTOR = 1.0 / 16.0;
     float nx = S[0] - S[2] + (2.0*S[3]) - (2.0*S[5]) + S[6] - S[8];
     float ny = S[0] + (2.0*S[1]) + S[2] - S[6] - (2.0*S[7]) - S[8];
-    float3 norm = math::normalize(float3(nx * scale, ny * scale, 0.125));
+    // Match the fixed UV spacing used by HeightToNormalNodeMdl (filter size 1, offset 0).
+    float2 sampleSize = mx_compute_sample_size_uv(float2(0.0), 1.0, 0.0);
+    // Convert the Sobel sums to negative height derivatives per UV unit.
+    float3 norm = math::normalize(float3(
+        nx * scale * SOBEL_SCALE_FACTOR / (8.0 * sampleSize.x),
+        ny * scale * SOBEL_SCALE_FACTOR / (8.0 * sampleSize.y), 1.0));
     return (norm + 1.0) * 0.5;
 }
 

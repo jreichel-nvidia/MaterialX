@@ -10,6 +10,7 @@
 
 #include <MaterialXFormat/File.h>
 #include <MaterialXFormat/Util.h>
+#include <MaterialXFormat/XmlIo.h>
 
 #include <MaterialXGenMdl/MdlShaderGenerator.h>
 #include <MaterialXGenMdl/MdlSyntax.h>
@@ -17,6 +18,7 @@
 #include <MaterialXGenShader/DefaultColorManagementSystem.h>
 #include <MaterialXGenShader/Exception.h>
 #include <MaterialXGenShader/GenContext.h>
+#include <MaterialXGenShader/Shader.h>
 #include <MaterialXGenShader/Util.h>
 
 
@@ -202,6 +204,421 @@ TEST_CASE("GenShader: MDL Syntax", "[genmdl]")
 }
 
 
+// Check that the "enable_derivatives" option can only be set for MDL 1.13 or later.
+TEST_CASE("GenShader: MDL Derivatives Option", "[genmdl]")
+{
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    mx::FileSearchPath searchPath = mx::getDefaultDataSearchPath();
+    context.registerSourceCodeSearchPath(searchPath);
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::loadLibraries({ "libraries" }, searchPath, doc);
+    mx::NodePtr node = doc->addNode("constant", "constant", "float");
+
+    // Generation without MDL-specific options keeps derivatives disabled.
+    REQUIRE_NOTHROW(context.getShaderGenerator().generate("test", node, context));
+
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    REQUIRE_FALSE(options->enable_derivatives);
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    for (mx::GenMdlOptions::MdlVersion version :
+         { mx::GenMdlOptions::MdlVersion::MDL_1_6,
+           mx::GenMdlOptions::MdlVersion::MDL_1_7,
+           mx::GenMdlOptions::MdlVersion::MDL_1_8,
+           mx::GenMdlOptions::MdlVersion::MDL_1_9,
+           mx::GenMdlOptions::MdlVersion::MDL_1_10,
+           mx::GenMdlOptions::MdlVersion::MDL_1_11,
+           mx::GenMdlOptions::MdlVersion::MDL_1_12 })
+    {
+        options->targetVersion = version;
+        options->enable_derivatives = false;
+        REQUIRE_NOTHROW(context.getShaderGenerator().generate("test", node, context));
+
+        options->enable_derivatives = true;
+        // TODO update to MDL_1_13
+        if (version < mx::GenMdlOptions::MdlVersion::MDL_1_12)
+        {
+            REQUIRE_THROWS_AS(context.getShaderGenerator().generate("test", node, context),
+                              mx::ExceptionShaderGenError);
+        }
+        else
+        {
+            REQUIRE_NOTHROW(context.getShaderGenerator().generate("test", node, context));
+        }
+    }
+}
+
+
+// Check that the translation of an image node feeding into heighttonormal.in is translated
+// according to the "enable_derivatives" option.
+TEST_CASE("GenShader: MDL Derivatives Image Nodes", "[genmdl]")
+{
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+    mx::loadLibraries({ "libraries" }, paths, doc);
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    context.registerSourceCodeSearchPath(paths);
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    for (std::string type : { "float", "color3", "color4", "vector2", "vector3", "vector4" })
+    {
+        mx::NodePtr image = doc->addNode("image", "image_test", type);
+        mx::NodePtr extract;
+        if (type != "float")
+        {
+            extract = doc->addNode("extract", "extract_test", "float");
+            extract->addInput("in", type)->setConnectedNode(image);
+            extract->setInputValue("index", 0);
+        }
+        mx::NodePtr height = doc->addNode("heighttonormal", "height_test", "vector3");
+        height->addInput("in", "float")->setConnectedNode(extract ? extract : image);
+
+        for (bool enabled : { false, true, false })
+        {
+            options->enable_derivatives = enabled;
+            mx::ShaderPtr shader = context.getShaderGenerator().generate("test", height, context);
+            std::string code = shader->getSourceCode();
+            // TODO change to 1.13
+            CHECK((code.find("mdl 99.99;") != std::string::npos) == enabled);
+            CHECK((code.find("mx_image_with_derivatives_" + type) != std::string::npos) == enabled);
+            CHECK((code.find("mx_heighttonormal_with_derivatives(") != std::string::npos) == enabled);
+        }
+
+        doc->removeNode("height_test");
+        if (extract)
+            doc->removeNode("extract_test");
+        doc->removeNode("image_test");
+    }
+}
+
+
+// Check that a derivative requirement applies to the shared implementation of a compound node.
+//
+// Two instances use the same graph containing an image: one feeds heighttonormal.in, the other
+// feeds an ordinary value consumer. The shared image must use derivative-aware lookup for both
+// instances, with no separate ordinary lookup emitted.
+TEST_CASE("GenShader: MDL Derivatives Compound Instances", "[genmdl]")
+{
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+    mx::loadLibraries({ "libraries" }, paths, doc);
+    mx::readFromXmlString(doc, R"(<materialx version="1.39">
+      <nodedef name="ND_test_texture" node="test_texture"><output name="out" type="float"/></nodedef>
+      <nodegraph name="NG_test_texture" nodedef="ND_test_texture">
+        <image name="tex" type="float"/>
+        <output name="out" type="float" nodename="tex"/>
+      </nodegraph>
+      <test_texture name="height_source" type="float"/>
+      <test_texture name="ordinary_source" type="float"/>
+      <heighttonormal name="normal" type="vector3"><input name="in" type="float" nodename="height_source"/></heighttonormal>
+      <convert name="ordinary_vector" type="vector3"><input name="in" type="float" nodename="ordinary_source"/></convert>
+      <add name="result" type="vector3">
+        <input name="in1" type="vector3" nodename="normal"/>
+        <input name="in2" type="vector3" nodename="ordinary_vector"/>
+      </add>
+    </materialx>)");
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    context.registerSourceCodeSearchPath(paths);
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    options->enable_derivatives = true;
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    mx::ShaderPtr shader = context.getShaderGenerator().generate("test", doc->getNode("result"), context);
+    std::string code = shader->getSourceCode();
+    CHECK(code.find("::mx_image_with_derivatives_float(") != std::string::npos);
+    CHECK(code.find("::mx_image_float(") == std::string::npos);
+}
+
+
+// Check an image node shared directly by heighttonormal and an ordinary value consumer.
+//
+// With derivatives enabled, connecting the image to heighttonormal.in must emit exactly one
+// derivative-aware lookup shared by both consumers. Connecting it only to heighttonormal.scale
+// must not request derivatives. Toggle the option in the same context to check repeated generation.
+TEST_CASE("GenShader: MDL Derivatives Shared Image Nodes", "[genmdl]")
+{
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+    mx::loadLibraries({ "libraries" }, paths, doc);
+
+    mx::NodePtr image = doc->addNode("image", "shared_image", "float");
+    mx::NodePtr convert = doc->addNode("convert", "ordinary", "vector3");
+    convert->addInput("in", "float")->setConnectedNode(image);
+    mx::NodePtr height = doc->addNode("heighttonormal", "normal", "vector3");
+    mx::NodePtr result = doc->addNode("add", "result", "vector3");
+    result->addInput("in1", "vector3")->setConnectedNode(height);
+    result->addInput("in2", "vector3")->setConnectedNode(convert);
+
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    context.registerSourceCodeSearchPath(paths);
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    for (std::string input : { "in", "scale" })
+    {
+        height->addInput(input, "float")->setConnectedNode(image);
+        for (bool enabled : { true, false, true })
+        {
+            options->enable_derivatives = enabled;
+            mx::ShaderPtr shader = context.getShaderGenerator().generate("test", result, context);
+            std::string code = shader->getSourceCode();
+            std::string call = "::mx_image_with_derivatives_float(";
+            size_t pos = code.find(call);
+            bool expected = enabled && input == "in";
+            CHECK((pos != std::string::npos) == expected);
+            if (expected)
+            {
+                CHECK(code.find(call, pos + call.size()) == std::string::npos);
+                CHECK(code.find("::mx_image_float(") == std::string::npos);
+            }
+        }
+        height->removeInput(input);
+    }
+}
+
+
+// Check that traversal resolves graph interface inputs through each calling instance.
+//
+// Two instances share a graph with two outputs, each depending on a different interface input.
+// The callers connect four distinct images in total. Test heighttonormal both outside the graph
+// (after summing its outputs) and inside it (on each output). All four images must use
+// derivative-aware lookup: visiting an implementation through one instance must not prevent
+// visiting it through the other instance and following that caller's connections.
+TEST_CASE("GenShader: MDL Derivatives Traversal Interfaces", "[genmdl]")
+{
+    for (bool internalHeightToNormal : { false, true })
+    {
+        mx::DocumentPtr doc = mx::createDocument();
+        mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+        mx::loadLibraries({ "libraries" }, paths, doc);
+        mx::readFromXmlString(doc, R"(<materialx version="1.39">
+          <nodedef name="ND_test_pair" node="test_pair">
+            <input name="a" type="float" value="0"/>
+            <input name="b" type="float" value="0"/>
+            <output name="outa" type="float"/>
+            <output name="outb" type="float"/>
+          </nodedef>
+          <nodegraph name="NG_test_pair" nodedef="ND_test_pair">
+            <sin name="sa" type="float"><input name="in" type="float" interfacename="a"/></sin>
+            <cos name="cb" type="float"><input name="in" type="float" interfacename="b"/></cos>
+            <output name="outa" type="float" nodename="sa"/>
+            <output name="outb" type="float" nodename="cb"/>
+          </nodegraph>
+        </materialx>)");
+
+        mx::NodeGraphPtr graph = doc->getNodeGraph("NG_test_pair");
+        std::string outputType = internalHeightToNormal ? "vector3" : "float";
+
+        // Add internal heighttonormal node.
+        if (internalHeightToNormal)
+        {
+            for (std::string name : { "outa", "outb" })
+            {
+                mx::OutputPtr output = graph->getOutput(name);
+                mx::NodePtr height = graph->addNode("heighttonormal", "normal_" + name, "vector3");
+                height->addInput("in", "float")->setConnectedNode(output->getConnectedNode());
+                output->setConnectedNode(height);
+                output->setType(outputType);
+                doc->getNodeDef("ND_test_pair")->getOutput(name)->setType(outputType);
+            }
+        }
+        mx::NodePtr result = doc->addNode("add", "result", "vector3");
+
+        for (int i = 0; i < 2; ++i)
+        {
+            // Add inputs.
+            std::string suffix = std::to_string(i);
+            mx::NodePtr pair = doc->addNode("test_pair", "pair" + suffix, "multioutput");
+            for (std::string name : { "a", "b" })
+            {
+                mx::NodePtr image = doc->addNode("image", "image_" + name + suffix, "float");
+                pair->addInput(name, "float")->setConnectedNode(image);
+            }
+
+            // Add sum node.
+            mx::NodePtr sum = doc->addNode("add", "sum" + suffix, outputType);
+            for (int j = 0; j < 2; ++j)
+            {
+                mx::InputPtr input = sum->addInput("in" + std::to_string(j + 1), outputType);
+                input->setConnectedNode(pair);
+                input->setOutputString(j == 0 ? "outa" : "outb");
+            }
+
+            // Add external heighttonormal node.
+            mx::NodePtr normal = sum;
+            if (!internalHeightToNormal)
+            {
+                normal = doc->addNode("heighttonormal", "normal" + suffix, "vector3");
+                normal->addInput("in", "float")->setConnectedNode(sum);
+            }
+            result->addInput("in" + std::to_string(i + 1), "vector3")->setConnectedNode(normal);
+        }
+
+        mx::GenContext context(mx::MdlShaderGenerator::create());
+        context.registerSourceCodeSearchPath(paths);
+        mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+        options->enable_derivatives = true;
+        context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+        // Check that there are four calls to mx_image_with_derivatives_float and none for
+        // mx_image_float.
+        mx::ShaderPtr shader = context.getShaderGenerator().generate("test", result, context);
+        std::string code = shader->getSourceCode();
+        std::string call = "::mx_image_with_derivatives_float(";
+        size_t count = 0;
+        for (size_t pos = code.find(call); pos != std::string::npos; pos = code.find(call, pos + call.size()))
+            ++count;
+        CHECK(count == 4);
+        CHECK(code.find("::mx_image_float(") == std::string::npos);
+    }
+}
+
+
+// Check output selection and interface resolution through two levels of shared graph instances.
+//
+// Each of two outer instances calls the same inner two-output graph and forwards its interface
+// inputs. Four distinct images supply the outer callers. Only one output per caller feeds
+// heighttonormal.in; the other feeds an ordinary consumer. Check each image's lookup separately:
+// only the selected pair must use derivatives, even though all four images share an implementation.
+// The inner instance is shared, so traversal must retain the full path to distinguish outer callers.
+TEST_CASE("GenShader: MDL Derivatives Nested Output Selection", "[genmdl]")
+{
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+    mx::loadLibraries({ "libraries" }, paths, doc);
+    mx::readFromXmlString(doc, R"(<materialx version="1.39">
+      <nodedef name="ND_pair" node="test_pair">
+        <input name="a" type="float" value="0"/>
+        <input name="b" type="float" value="0"/>
+        <output name="outa" type="float"/>
+        <output name="outb" type="float"/>
+      </nodedef>
+      <nodegraph name="NG_pair" nodedef="ND_pair">
+        <sin name="a" type="float"><input name="in" type="float" interfacename="a"/></sin>
+        <cos name="b" type="float"><input name="in" type="float" interfacename="b"/></cos>
+        <output name="outa" type="float" nodename="a"/>
+        <output name="outb" type="float" nodename="b"/>
+      </nodegraph>
+      <nodedef name="ND_outer" node="test_outer">
+        <input name="a" type="float" value="0"/>
+        <input name="b" type="float" value="0"/>
+        <output name="outa" type="float"/>
+        <output name="outb" type="float"/>
+      </nodedef>
+      <nodegraph name="NG_outer" nodedef="ND_outer">
+        <test_pair name="inner" type="multioutput">
+          <input name="a" type="float" interfacename="a"/>
+          <input name="b" type="float" interfacename="b"/>
+        </test_pair>
+        <output name="outa" type="float" nodename="inner" output="outa"/>
+        <output name="outb" type="float" nodename="inner" output="outb"/>
+      </nodegraph>
+    </materialx>)");
+
+    mx::NodePtr result = doc->addNode("add", "result", "vector3");
+    for (int i = 0; i < 2; ++i)
+    {
+        // Add outer instances and their inputs.
+        std::string suffix = std::to_string(i);
+        mx::NodePtr outer = doc->addNode("test_outer", "outer" + suffix, "multioutput");
+        for (std::string name : { "a", "b" })
+        {
+            mx::NodePtr image = doc->addNode("image", "image_" + name + suffix, "float");
+            outer->addInput(name, "float")->setConnectedNode(image);
+        }
+
+        // Connect heighttonormal consumer to outa.
+        mx::NodePtr heightToNormal = doc->addNode("heighttonormal", "normal" + suffix, "vector3");
+        mx::InputPtr heightInput = heightToNormal->addInput("in", "float");
+        heightInput->setConnectedNode(outer);
+        heightInput->setOutputString("outa");
+
+        // Connect ordinary consumer to outb.
+        mx::NodePtr ordinary = doc->addNode("convert", "ordinary" + suffix, "vector3");
+        mx::InputPtr ordinaryInput = ordinary->addInput("in", "float");
+        ordinaryInput->setConnectedNode(outer);
+        ordinaryInput->setOutputString("outb");
+
+        // Add both consumers and connect to one input of result.
+        mx::NodePtr sum = doc->addNode("add", "sum" + suffix, "vector3");
+        sum->addInput("in1", "vector3")->setConnectedNode(heightToNormal);
+        sum->addInput("in2", "vector3")->setConnectedNode(ordinary);
+        result->addInput("in" + std::to_string(i + 1), "vector3")->setConnectedNode(sum);
+    }
+
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    context.registerSourceCodeSearchPath(paths);
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    options->enable_derivatives = true;
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    // Exercise both selections so always following the first graph output cannot pass.
+    for (std::string selected : { "a", "b" })
+    {
+        CAPTURE(selected);
+
+        // Connect heighttonormal consumer to selected output, ordinary consumer to other output.
+        for (int i = 0; i < 2; ++i)
+        {
+            std::string suffix = std::to_string(i);
+            doc->getNode("normal" + suffix)->getInput("in")->setOutputString("out" + selected);
+            doc->getNode("ordinary" + suffix)->getInput("in")->setOutputString(
+                selected == "a" ? "outb" : "outa");
+        }
+
+        mx::ShaderPtr shader = context.getShaderGenerator().generate("test", result, context);
+        std::string code = shader->getSourceCode();
+        for (int i = 0; i < 2; ++i)
+        {
+            for (std::string name : { "a", "b" })
+            {
+                std::string image = "image_" + name + std::to_string(i);
+                CAPTURE(image);
+                size_t pos = code.find(image + "_out = ");
+                REQUIRE(pos != std::string::npos);
+                std::string assignment = code.substr(pos, code.find('\n', pos) - pos);
+                bool derivatives = name == selected;
+                CHECK((assignment.find("::mx_image_with_derivatives_float(") != std::string::npos) == derivatives);
+                CHECK((assignment.find("::mx_image_float(") != std::string::npos) == !derivatives);
+            }
+        }
+    }
+}
+
+
+// Check that the graph traversal is not linear in the number of paths (but linear in the number of
+// nodes and edges).
+TEST_CASE("GenShader: MDL Derivatives Traversal Complexity", "[genmdl]")
+{
+    mx::DocumentPtr doc = mx::createDocument();
+    mx::FileSearchPath paths = mx::getDefaultDataSearchPath();
+    mx::loadLibraries({ "libraries" }, paths, doc);
+
+    mx::NodePtr upstream = doc->addNode("image", "image", "float");
+    for (int i = 0; i < 24; ++i)
+    {
+        mx::NodePtr node = doc->addNode("add", "branch" + std::to_string(i), "float");
+        node->addInput("in1", "float")->setConnectedNode(upstream);
+        node->addInput("in2", "float")->setConnectedNode(upstream);
+        upstream = node;
+    }
+    mx::NodePtr height = doc->addNode("heighttonormal", "normal", "vector3");
+    height->addInput("in", "float")->setConnectedNode(upstream);
+
+    mx::GenContext context(mx::MdlShaderGenerator::create());
+    context.registerSourceCodeSearchPath(paths);
+    mx::GenMdlOptionsPtr options = std::make_shared<mx::GenMdlOptions>();
+    options->enable_derivatives = true;
+    context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, options);
+
+    mx::ShaderPtr shader = context.getShaderGenerator().generate("test", height, context);
+    std::string code = shader->getSourceCode();
+    CHECK(code.find("::mx_image_with_derivatives_float(") != std::string::npos);
+    CHECK(code.find("::mx_image_float(") == std::string::npos);
+}
+
+
 TEST_CASE("GenShader: MDL Implementation Check", "[genmdl]")
 {
     mx::GenContext context(mx::MdlShaderGenerator::create());
@@ -238,6 +655,10 @@ void MdlShaderGeneratorTester::compileSource(const std::vector<mx::FilePath>& so
     {
         return;
     }
+
+    auto options = std::dynamic_pointer_cast<mx::GenMdlOptions>(_userData[mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY]);
+    if (options && options->enable_derivatives)
+        mdlcCommand += " --experimental-features";
 
     // use the same paths as the resolver
     for (const auto& sp : _mdlCustomResolver->getMdlSearchPaths())
@@ -296,6 +717,8 @@ void MdlShaderGeneratorTester::compileSource(const std::vector<mx::FilePath>& so
     }
 
     // return 0 indicates success, everything else a failure
+    INFO("MDL compiler command: " << mdlcCommand);
+    INFO("MDL compiler log: " << errorFile.asString());
     CHECK(returnValue == 0);
 }
 
@@ -331,3 +754,45 @@ TEST_CASE("GenShader: MDL Shader Generation", "[genmdl]")
     tester.validate(genOptions, optionsFilePath);
 }
 
+// Compile a fixed regression subset in both modes, independent of external testing options.
+TEST_CASE("GenShader: MDL Shader Generation Derivatives Subset", "[genmdl]")
+{
+    bool derivatives = false;
+    SECTION("Disabled") { derivatives = false; }
+    SECTION("Enabled") { derivatives = true; }
+    CAPTURE(derivatives);
+
+    mx::FileSearchPath searchPath = mx::getDefaultDataSearchPath();
+    mx::FilePath root = searchPath.find("resources/Materials/TestSuite");
+    GenShaderUtil::TestSuiteOptions options {};
+    options.targets = { "genmdl" };
+    options.checkImplCount = false;
+    // Keep artifacts with the resolved test resources, as for ordinary shader generation.
+    options.outputDirectory = root / "genmdl_derivative_subset" /
+        (derivatives ? "enabled" : "disabled");
+    for (std::string file : {
+             "stdlib/convolution/heighttonormal.mtlx",
+             "stdlib/convolution/heighttonormal2.mtlx",
+             "stdlib/color_management/color3_vec3_cm_test.mtlx",
+             "stdlib/texture/image_channels.mtlx",
+             "pbrlib/multioutput/mixedoutput.mtlx",
+             "pbrlib/multioutput/mixedoutput2.mtlx" })
+    {
+        INFO("Required corpus file: " << file);
+        REQUIRE((root / file).exists());
+        options.overrideFiles.push_back(mx::FilePath(file).getBaseName());
+    }
+
+    bool compile = !std::string(MATERIALX_MDL_BINARY_MDLC).empty();
+    if (!compile)
+        WARN("mdlc is not configured: running generation only; compilation is skipped.");
+    MdlShaderGeneratorTester tester(mx::MdlShaderGenerator::create(), { root }, searchPath,
+                                   "compile.log", compile);
+    tester.addSkipLibraryFiles();
+    mx::GenMdlOptionsPtr mdlOptions = std::make_shared<mx::GenMdlOptions>();
+    mdlOptions->enable_derivatives = derivatives;
+    tester.addUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, mdlOptions);
+    mx::GenOptions genOptions;
+    genOptions.targetColorSpaceOverride = "lin_rec709_scene";
+    tester.validate(genOptions, options);
+}
