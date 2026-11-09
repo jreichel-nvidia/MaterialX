@@ -749,6 +749,7 @@ TEST_CASE("GenShader: MDL Shader Generation", "[genmdl]")
     // Specify the MDL target version to be the latest which is also the default.
     mx::GenMdlOptionsPtr genMdlOptions = std::make_shared<mx::GenMdlOptions>();
     genMdlOptions->targetVersion = mx::GenMdlOptions::MdlVersion::MDL_LATEST;
+    genMdlOptions->enable_derivatives = true;
     tester.addUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, genMdlOptions);
 
     tester.validate(genOptions, optionsFilePath);

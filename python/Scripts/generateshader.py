@@ -112,6 +112,10 @@ def main():
         codeSearchPath.append(os.path.dirname(inputFilename))
         context = mx_gen_shader.GenContext(shadergen)
         context.registerSourceCodeSearchPath(codeSearchPath)
+        if gentarget == 'mdl':
+            mdloptions = mx_gen_mdl.GenMdlOptions()
+            mdloptions.enable_derivatives = True
+            context.pushUserData(mx_gen_mdl.GenMdlOptions.GEN_CONTEXT_USER_DATA_KEY, mdloptions)
         shadergen.registerTypeDefs(doc);
 
         # If we're generating Vulkan-compliant GLSL then set the binding context

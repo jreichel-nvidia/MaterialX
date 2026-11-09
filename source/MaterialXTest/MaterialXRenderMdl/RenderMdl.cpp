@@ -101,6 +101,7 @@ RenderUtil::RenderProfileResult MdlShaderRenderTester::runRenderer(
 
                 // Specify the MDL target version to be the latest which is also the default.
                 genMdlOptions->targetVersion = mx::GenMdlOptions::MdlVersion::MDL_LATEST;
+                genMdlOptions->enable_derivatives = true;
                 context.pushUserData(mx::GenMdlOptions::GEN_CONTEXT_USER_DATA_KEY, genMdlOptions);
 
                 shader = shadergen.generate(shaderName, element, context);
